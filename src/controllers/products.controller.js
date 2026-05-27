@@ -6,6 +6,33 @@ const logger = require('../utils/logger');
 const EXTERNAL_API = process.env.EXTERNAL_API_BASE || 'https://mdiapiqa.gesyco.co/api/v1';
 const COMPANY_ID   = process.env.COMPANY_ID || '2';
 
+// ── Caché en memoria (RNF-02 Rendimiento) ─────────────────────────────────────
+// La API externa de Gesyco tarda 8-16 segundos. Este caché guarda el resultado
+// por 5 minutos. Primera carga: ~16s. Siguientes: ~50ms desde caché.
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos
+const _cache = { data: null, ts: 0 };
+
+async function getExternalProducts(section) {
+  const now = Date.now();
+  // Si hay datos en caché y no han expirado, devolverlos directamente
+  if (_cache.data && (now - _cache.ts) < CACHE_TTL_MS) {
+    logger.info('products.cache', `Caché válido (${Math.round((CACHE_TTL_MS - (now - _cache.ts)) / 1000)}s restantes)`);
+    return _cache.data;
+  }
+  // Llamar a la API externa
+  const { data } = await axios.get(
+    `${EXTERNAL_API}/catalogs/presentations/${section}`,
+    { params: { company_id: COMPANY_ID, recursion: 'mixed', recursion_level: 2 }, timeout: 10000 }
+  );
+  const products = (Object.values(data)[3] || []).map(mapExt).filter(p => p.price > 0);
+  // Guardar en caché
+  _cache.data = products;
+  _cache.ts   = now;
+  logger.info('products.cache', `Caché actualizado — ${products.length} productos externos`);
+  return products;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Convierte undefined → null para que mysql2 no falle
 const n = (v) => (v === undefined || v === '') ? null : v;
 
@@ -29,7 +56,7 @@ function mapExt(el) {
 // GET /api/products
 async function getAll(req, res) {
   try {
-    const { section = 'getByCompany', page = 1, limit = 20, source = 'all', category } = req.query;
+    const { section = 'getByCompany', page = 1, limit = 20, source = 'local', category } = req.query;
     const pg     = Math.max(1, parseInt(page));
     const lm     = Math.min(100, Math.max(1, parseInt(limit)));
     const offset = (pg - 1) * lm;
@@ -47,11 +74,7 @@ async function getAll(req, res) {
 
     if (source === 'all' || source === 'external') {
       try {
-        const { data } = await axios.get(
-          `${EXTERNAL_API}/catalogs/presentations/${section}`,
-          { params: { company_id: COMPANY_ID, recursion: 'mixed', recursion_level: 2 }, timeout: 8000 }
-        );
-        external = (Object.values(data)[3] || []).map(mapExt).filter(p => p.price > 0);
+        external = await getExternalProducts(section);
       } catch (e) {
         logger.warn('products.getAll', 'API externa no disponible', e.message);
       }
@@ -164,4 +187,26 @@ async function remove(req, res) {
   }
 }
 
-module.exports = { getAll, getOne, create, update, remove };
+// GET /api/products/stock-alerts  (usado en Reportes.jsx)
+async function stockAlerts(req, res) {
+  try {
+    const low = await query('SELECT id, sku, name, stock FROM products WHERE stock <= 5 ORDER BY stock ASC');
+    const failed = await query(
+      `SELECT product_name, COUNT(*) AS attempt_count, SUM(requested) AS total_requested
+       FROM stock_log GROUP BY product_name ORDER BY attempt_count DESC LIMIT 20`
+    );
+    return res.json({ low_stock: low, failed_attempts: failed });
+  } catch (err) {
+    return res.status(500).json({ error: 'Error interno' });
+  }
+}
+
+// POST /api/products/cache/invalidate  — forzar recarga de la API externa
+async function invalidateCache(req, res) {
+  _cache.data = null;
+  _cache.ts   = 0;
+  logger.info('products.cache', 'Caché invalidado manualmente');
+  return res.json({ message: 'Caché invalidado. Próxima petición recargará desde Gesyco.' });
+}
+
+module.exports = { getAll, getOne, create, update, remove, stockAlerts, invalidateCache };

@@ -1,6 +1,7 @@
 // src/controllers/orders.controller.js
 const logger = require('../utils/logger');
 const { query, queryOne, run, transaction } = require('../models/db');
+const { sendConfirmacionCompra } = require('../utils/email');
 
 // POST /api/orders
 async function create(req, res) {
@@ -103,6 +104,9 @@ async function create(req, res) {
        WHERE od.order_id = ?`,
       [orderId]
     );
+    // RF-22 — Enviar confirmación de compra por correo (sin bloquear la respuesta)
+    const emailTo = order_email || order.customer_email || req.user.email;
+    sendConfirmacionCompra(order, details, emailTo).catch(() => {});
     return res.status(201).json({ ...order, items: details });
   } catch (err) {
     logger.error('[orders.create]', err.message, err.stack);
@@ -336,7 +340,7 @@ async function savePaymentDetails(req, res) {
     );
 
     logger.info('orders.payment', `Orden #${id} marcada pagada — CS ID: ${cs_transaction_id || 'simulado'}`);
-    return res.json(await queryOne(
+    const updatedOrder = await queryOne(
       `SELECT o.*,
               COALESCE(o.nombre_cliente, c.full_name) AS nombre_cliente,
               COALESCE(o.cedula_cliente, c.cedula)    AS cedula_cliente,
@@ -347,7 +351,18 @@ async function savePaymentDetails(req, res) {
        LEFT JOIN customers c ON o.customer_id = c.id
        WHERE o.id = ?`,
       [id]
-    ));
+    );
+    // RF-22 — Email de confirmación de pago (sin bloquear la respuesta)
+    const detailsForEmail = await query(
+      `SELECT od.*, p.name AS product_name
+       FROM order_details od
+       LEFT JOIN products p ON od.product_id = p.id
+       WHERE od.order_id = ?`,
+      [id]
+    );
+    const emailTo = updatedOrder.order_email || updatedOrder.customer_email;
+    sendConfirmacionCompra(updatedOrder, detailsForEmail, emailTo).catch(() => {});
+    return res.json(updatedOrder);
   } catch (err) {
     logger.error('orders.payment', err.message, err.stack);
     return res.status(500).json({ error: 'Error interno del servidor' });
