@@ -1,7 +1,7 @@
 // src/controllers/orders.controller.js
 const logger = require('../utils/logger');
 const { query, queryOne, run, transaction } = require('../models/db');
-const { sendConfirmacionCompra } = require('../utils/email');
+const { sendConfirmacionCompra, sendEmailByStatus } = require('../utils/email');
 
 // POST /api/orders
 async function create(req, res) {
@@ -228,7 +228,8 @@ async function updateStatus(req, res) {
     }
 
     await run('UPDATE orders SET order_status = ? WHERE id = ?', [status, req.params.id]);
-    return res.json(await queryOne(
+
+    const updatedOrder = await queryOne(
       `SELECT o.*,
               COALESCE(o.nombre_cliente, c.full_name) AS nombre_cliente,
               COALESCE(o.cedula_cliente, c.cedula)    AS cedula_cliente,
@@ -239,7 +240,22 @@ async function updateStatus(req, res) {
        LEFT JOIN customers c ON o.customer_id = c.id
        WHERE o.id = ?`,
       [req.params.id]
-    ));
+    );
+
+    // Notificar al cliente por email según el nuevo estado
+    if (['enviado', 'entregado', 'cancelado'].includes(status)) {
+      const detailsForEmail = await query(
+        `SELECT od.*, p.name AS product_name
+         FROM order_details od
+         LEFT JOIN products p ON od.product_id = p.id
+         WHERE od.order_id = ?`,
+        [req.params.id]
+      );
+      const emailTo = updatedOrder.order_email || updatedOrder.customer_email;
+      sendEmailByStatus(updatedOrder, detailsForEmail, emailTo, status).catch(() => {});
+    }
+
+    return res.json(updatedOrder);
   } catch (err) {
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
