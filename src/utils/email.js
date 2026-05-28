@@ -2,23 +2,26 @@
 // RF-22 — Confirmación de compra por correo electrónico
 // Usa nodemailer. Configurar en .env: EMAIL_USER, EMAIL_PASS, EMAIL_FROM
 // Si no hay credenciales, usa Ethereal (bandeja de prueba) automáticamente.
-
+ 
 const nodemailer = require('nodemailer');
 const logger     = require('./logger');
-
+ 
 // ── Crear transporter ─────────────────────────────────────────────────────────
 let _transporter = null;
-
+ 
 async function getTransporter() {
   if (_transporter) return _transporter;
-
+ 
   const user = process.env.EMAIL_USER;
   const pass = process.env.EMAIL_PASS;
-
+ 
   if (user && pass) {
-    // Gmail / SMTP real
+    // Gmail / SMTP real — forzar IPv4 (evita ENETUNREACH en servidores sin IPv6)
     _transporter = nodemailer.createTransport({
-      service: process.env.EMAIL_SERVICE || 'gmail',
+      host:   'smtp.gmail.com',
+      port:   465,
+      secure: true,
+      family: 4,              // ← fuerza IPv4, evita error ENETUNREACH IPv6
       auth: { user, pass },
     });
     logger.info('email', `Transporter configurado con ${user}`);
@@ -33,15 +36,15 @@ async function getTransporter() {
     });
     logger.info('email', `Usando Ethereal (prueba). Bandeja: ${testAccount.web}`);
   }
-
+ 
   return _transporter;
 }
-
+ 
 // ── Formato de moneda colombiana ──────────────────────────────────────────────
 function fmt(n) {
   return `$${Number(n).toLocaleString('es-CO')}`;
 }
-
+ 
 // ── Template HTML de confirmación de compra ───────────────────────────────────
 function buildConfirmacionHTML(order, items) {
   const statusLabels = {
@@ -51,7 +54,7 @@ function buildConfirmacionHTML(order, items) {
     entregado: '📦 Entregado',
     cancelado: '❌ Cancelado',
   };
-
+ 
   const itemsRows = (items || []).map(item => `
     <tr>
       <td style="padding:10px 12px;border-bottom:1px solid #f0e6d3;font-weight:600;color:#2D1E0E;">
@@ -68,11 +71,11 @@ function buildConfirmacionHTML(order, items) {
       </td>
     </tr>
   `).join('');
-
+ 
   const subtotal      = (items || []).reduce((s, i) => s + i.price * i.quantity, 0);
   const shippingCost  = parseFloat(order.shipping_cost || 0);
   const isPagado      = order.order_status === 'pagado';
-
+ 
   return `
 <!DOCTYPE html>
 <html lang="es">
@@ -82,11 +85,11 @@ function buildConfirmacionHTML(order, items) {
   <title>Confirmación de compra — Artesanías Colombianas</title>
 </head>
 <body style="margin:0;padding:0;background:#faf6f0;font-family:'Helvetica Neue',Arial,sans-serif;">
-
+ 
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#faf6f0;padding:32px 0;">
     <tr><td align="center">
       <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(45,30,14,.10);">
-
+ 
         <!-- ── CABECERA ── -->
         <tr>
           <td style="background:#2D1E0E;padding:28px 36px;text-align:center;">
@@ -94,7 +97,7 @@ function buildConfirmacionHTML(order, items) {
             <p style="margin:8px 0 0;color:#e8d5a8;font-size:14px;">Tradición hecha a mano</p>
           </td>
         </tr>
-
+ 
         <!-- ── TÍTULO ── -->
         <tr>
           <td style="padding:32px 36px 8px;text-align:center;">
@@ -109,7 +112,7 @@ function buildConfirmacionHTML(order, items) {
             </p>
           </td>
         </tr>
-
+ 
         <!-- ── INFO ORDEN ── -->
         <tr>
           <td style="padding:20px 36px;">
@@ -141,7 +144,7 @@ function buildConfirmacionHTML(order, items) {
             </table>
           </td>
         </tr>
-
+ 
         <!-- ── PRODUCTOS ── -->
         ${items && items.length > 0 ? `
         <tr>
@@ -163,7 +166,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
         ` : ''}
-
+ 
         <!-- ── TOTALES ── -->
         <tr>
           <td style="padding:0 36px 20px;">
@@ -183,7 +186,7 @@ function buildConfirmacionHTML(order, items) {
             </table>
           </td>
         </tr>
-
+ 
         <!-- ── DIRECCIÓN ── -->
         ${order.shipping_address ? `
         <tr>
@@ -195,7 +198,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
         ` : ''}
-
+ 
         <!-- ── CTA si está pendiente ── -->
         ${!isPagado ? `
         <tr>
@@ -208,7 +211,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
         ` : ''}
-
+ 
         <!-- ── PIE ── -->
         <tr>
           <td style="background:#2D1E0E;padding:20px 36px;text-align:center;">
@@ -221,7 +224,7 @@ function buildConfirmacionHTML(order, items) {
             </p>
           </td>
         </tr>
-
+ 
       </table>
     </td></tr>
   </table>
@@ -229,26 +232,26 @@ function buildConfirmacionHTML(order, items) {
 </html>
   `.trim();
 }
-
+ 
 // ── Función principal: enviar confirmación de compra ──────────────────────────
 async function sendConfirmacionCompra(order, items, recipientEmail) {
   const email = recipientEmail
     || order.order_email
     || order.customer_email
     || null;
-
+ 
   if (!email) {
     logger.warn('email', `Orden #${order.id}: sin email — confirmación no enviada`);
     return { sent: false, reason: 'sin_email' };
   }
-
+ 
   const isPagado   = order.order_status === 'pagado';
   const subject    = isPagado
     ? `✅ Pago confirmado — Orden #${order.id} | Artesanías Colombianas`
     : `🛍️ Pedido recibido #${order.id} | Artesanías Colombianas`;
-
+ 
   const html = buildConfirmacionHTML(order, items);
-
+ 
   // Texto plano de fallback
   const textLines = [
     isPagado ? `¡Pago confirmado! Orden #${order.id}` : `¡Pedido recibido! Orden #${order.id}`,
@@ -263,7 +266,7 @@ async function sendConfirmacionCompra(order, items, recipientEmail) {
     '',
     `Ver tus pedidos: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/mis-pedidos`,
   ];
-
+ 
   try {
     const transporter = await getTransporter();
     const info = await transporter.sendMail({
@@ -275,7 +278,7 @@ async function sendConfirmacionCompra(order, items, recipientEmail) {
       text:    textLines.join('\n'),
       html,
     });
-
+ 
     // Si es Ethereal, imprimir URL de preview en los logs
     const previewUrl = nodemailer.getTestMessageUrl(info);
     if (previewUrl) {
@@ -283,12 +286,12 @@ async function sendConfirmacionCompra(order, items, recipientEmail) {
     } else {
       logger.info('email', `📧 Confirmación enviada a ${email} — MessageId: ${info.messageId}`);
     }
-
+ 
     return { sent: true, messageId: info.messageId, previewUrl: previewUrl || null };
   } catch (err) {
     logger.error('email', `Error enviando a ${email}: ${err.message}`);
     return { sent: false, reason: err.message };
   }
 }
-
+ 
 module.exports = { sendConfirmacionCompra };
