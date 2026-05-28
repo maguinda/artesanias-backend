@@ -3,6 +3,9 @@
 // Usa nodemailer. Configurar en .env: EMAIL_USER, EMAIL_PASS, EMAIL_FROM
 // Si no hay credenciales, usa Ethereal (bandeja de prueba) automáticamente.
  
+const dns        = require('dns');
+dns.setDefaultResultOrder('ipv4first'); // fuerza IPv4 — evita ENETUNREACH en servidores sin IPv6
+ 
 const nodemailer = require('nodemailer');
 const logger     = require('./logger');
  
