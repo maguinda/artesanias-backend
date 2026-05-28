@@ -1,46 +1,24 @@
 // src/utils/email.js
 // RF-22 — Confirmación de compra por correo electrónico
-// Usa nodemailer. Configurar en .env: EMAIL_USER, EMAIL_PASS, EMAIL_FROM
-// Si no hay credenciales, usa Ethereal (bandeja de prueba) automáticamente.
+// Usa Resend (HTTPS) — compatible con Railway y otros hosts que bloquean SMTP.
+// Configurar en .env: RESEND_API_KEY, EMAIL_FROM (opcional)
  
-const dns        = require('dns');
-dns.setDefaultResultOrder('ipv4first'); // fuerza IPv4 — evita ENETUNREACH en servidores sin IPv6
- 
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const logger     = require('./logger');
  
-// ── Crear transporter ─────────────────────────────────────────────────────────
-let _transporter = null;
+// ── Cliente Resend ────────────────────────────────────────────────────────────
+let _resend = null;
  
-async function getTransporter() {
-  if (_transporter) return _transporter;
- 
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASS;
- 
-  if (user && pass) {
-    // Gmail / SMTP real — forzar IPv4 (evita ENETUNREACH en servidores sin IPv6)
-    _transporter = nodemailer.createTransport({
-      host:   'smtp.gmail.com',
-      port:   465,
-      secure: true,
-      family: 4,              // ← fuerza IPv4, evita error ENETUNREACH IPv6
-      auth: { user, pass },
-    });
-    logger.info('email', `Transporter configurado con ${user}`);
-  } else {
-    // Sin credenciales → Ethereal (bandeja de prueba, ver URL en logs)
-    const testAccount = await nodemailer.createTestAccount();
-    _transporter = nodemailer.createTransport({
-      host:   'smtp.ethereal.email',
-      port:   587,
-      secure: false,
-      auth: { user: testAccount.user, pass: testAccount.pass },
-    });
-    logger.info('email', `Usando Ethereal (prueba). Bandeja: ${testAccount.web}`);
+function getResend() {
+  if (_resend) return _resend;
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    logger.warn('email', 'RESEND_API_KEY no configurada — emails desactivados');
+    return null;
   }
- 
-  return _transporter;
+  _resend = new Resend(apiKey);
+  logger.info('email', 'Resend configurado correctamente');
+  return _resend;
 }
  
 // ── Formato de moneda colombiana ──────────────────────────────────────────────
@@ -75,9 +53,9 @@ function buildConfirmacionHTML(order, items) {
     </tr>
   `).join('');
  
-  const subtotal      = (items || []).reduce((s, i) => s + i.price * i.quantity, 0);
-  const shippingCost  = parseFloat(order.shipping_cost || 0);
-  const isPagado      = order.order_status === 'pagado';
+  const subtotal     = (items || []).reduce((s, i) => s + i.price * i.quantity, 0);
+  const shippingCost = parseFloat(order.shipping_cost || 0);
+  const isPagado     = order.order_status === 'pagado';
  
   return `
 <!DOCTYPE html>
@@ -93,7 +71,7 @@ function buildConfirmacionHTML(order, items) {
     <tr><td align="center">
       <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(45,30,14,.10);">
  
-        <!-- ── CABECERA ── -->
+        <!-- CABECERA -->
         <tr>
           <td style="background:#2D1E0E;padding:28px 36px;text-align:center;">
             <h1 style="margin:0;color:#D4A853;font-size:24px;letter-spacing:1px;">🌿 ARTESANÍAS COLOMBIANAS</h1>
@@ -101,7 +79,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
  
-        <!-- ── TÍTULO ── -->
+        <!-- TÍTULO -->
         <tr>
           <td style="padding:32px 36px 8px;text-align:center;">
             <div style="font-size:48px;margin-bottom:12px;">${isPagado ? '✅' : '🛍️'}</div>
@@ -116,7 +94,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
  
-        <!-- ── INFO ORDEN ── -->
+        <!-- INFO ORDEN -->
         <tr>
           <td style="padding:20px 36px;">
             <table width="100%" style="background:#fdf8f2;border-radius:8px;border:1px solid #f0e6d3;">
@@ -148,7 +126,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
  
-        <!-- ── PRODUCTOS ── -->
+        <!-- PRODUCTOS -->
         ${items && items.length > 0 ? `
         <tr>
           <td style="padding:0 36px 20px;">
@@ -170,7 +148,7 @@ function buildConfirmacionHTML(order, items) {
         </tr>
         ` : ''}
  
-        <!-- ── TOTALES ── -->
+        <!-- TOTALES -->
         <tr>
           <td style="padding:0 36px 20px;">
             <table width="100%" style="background:#fdf8f2;border-radius:8px;border:1px solid #f0e6d3;">
@@ -190,7 +168,7 @@ function buildConfirmacionHTML(order, items) {
           </td>
         </tr>
  
-        <!-- ── DIRECCIÓN ── -->
+        <!-- DIRECCIÓN -->
         ${order.shipping_address ? `
         <tr>
           <td style="padding:0 36px 20px;">
@@ -202,7 +180,7 @@ function buildConfirmacionHTML(order, items) {
         </tr>
         ` : ''}
  
-        <!-- ── CTA si está pendiente ── -->
+        <!-- CTA si está pendiente -->
         ${!isPagado ? `
         <tr>
           <td style="padding:0 36px 28px;text-align:center;">
@@ -215,7 +193,7 @@ function buildConfirmacionHTML(order, items) {
         </tr>
         ` : ''}
  
-        <!-- ── PIE ── -->
+        <!-- PIE -->
         <tr>
           <td style="background:#2D1E0E;padding:20px 36px;text-align:center;">
             <p style="margin:0;color:#e8d5a8;font-size:13px;">
@@ -248,49 +226,32 @@ async function sendConfirmacionCompra(order, items, recipientEmail) {
     return { sent: false, reason: 'sin_email' };
   }
  
-  const isPagado   = order.order_status === 'pagado';
-  const subject    = isPagado
+  const resend   = getResend();
+  if (!resend) return { sent: false, reason: 'sin_api_key' };
+ 
+  const isPagado = order.order_status === 'pagado';
+  const subject  = isPagado
     ? `✅ Pago confirmado — Orden #${order.id} | Artesanías Colombianas`
     : `🛍️ Pedido recibido #${order.id} | Artesanías Colombianas`;
  
   const html = buildConfirmacionHTML(order, items);
  
-  // Texto plano de fallback
-  const textLines = [
-    isPagado ? `¡Pago confirmado! Orden #${order.id}` : `¡Pedido recibido! Orden #${order.id}`,
-    `Estado: ${order.order_status}`,
-    `Total: ${fmt(order.amount)}`,
-    `Método de pago: ${order.payment_method || '—'}`,
-    '',
-    'Productos:',
-    ...(items || []).map(i => `  - ${i.product_name || i.sku} x${i.quantity} — ${fmt(i.price * i.quantity)}`),
-    '',
-    `Dirección: ${order.shipping_address || '—'}${order.city ? ', ' + order.city : ''}`,
-    '',
-    `Ver tus pedidos: ${process.env.FRONTEND_URL || 'http://localhost:5173'}/mis-pedidos`,
-  ];
- 
   try {
-    const transporter = await getTransporter();
-    const info = await transporter.sendMail({
-      from:    process.env.EMAIL_FROM
-               ? `"Artesanías Colombianas" <${process.env.EMAIL_FROM}>`
-               : '"Artesanías Colombianas" <noreply@artesanias.com>',
+    const { data, error } = await resend.emails.send({
+      from:    'onboarding@resend.dev',
       to:      email,
       subject,
-      text:    textLines.join('\n'),
       html,
     });
  
-    // Si es Ethereal, imprimir URL de preview en los logs
-    const previewUrl = nodemailer.getTestMessageUrl(info);
-    if (previewUrl) {
-      logger.info('email', `📧 Email de prueba enviado (Ethereal). Ver en: ${previewUrl}`);
-    } else {
-      logger.info('email', `📧 Confirmación enviada a ${email} — MessageId: ${info.messageId}`);
+    if (error) {
+      logger.error('email', `Error Resend enviando a ${email}: ${error.message}`);
+      return { sent: false, reason: error.message };
     }
  
-    return { sent: true, messageId: info.messageId, previewUrl: previewUrl || null };
+    logger.info('email', `📧 Confirmación enviada a ${email} — Resend ID: ${data.id}`);
+    return { sent: true, messageId: data.id };
+ 
   } catch (err) {
     logger.error('email', `Error enviando a ${email}: ${err.message}`);
     return { sent: false, reason: err.message };
