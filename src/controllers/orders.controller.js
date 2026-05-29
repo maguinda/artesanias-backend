@@ -110,6 +110,10 @@ async function create(req, res) {
     return res.status(201).json({ ...order, items: details });
   } catch (err) {
     logger.error('[orders.create]', err.message, err.stack);
+    // Error de stock insuficiente — devolver 422 con mensaje legible al frontend
+    if (err.message && err.message.startsWith('Stock insuficiente')) {
+      return res.status(422).json({ error: err.message });
+    }
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
 }
