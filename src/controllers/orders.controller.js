@@ -44,31 +44,23 @@ async function create(req, res) {
       );
       const oid = orderRes.insertId;
 
-      // Verificar stock y actualizar
+      // Verificar stock (sin descontarlo — el descuento ocurre en savePaymentDetails al confirmar pago)
       for (const item of items) {
         const qty = parseInt(item.quantity);
 
-        // Solo verificar stock para productos locales (tienen product_id numérico)
         if (item.product_id) {
           const [rows] = await conn.execute(
             'SELECT stock, name FROM products WHERE id = ?', [item.product_id]
           );
           const product = rows[0];
-          if (product) {
-            if (product.stock < qty) {
-              // Registrar intento fallido en stock_log
-              await conn.execute(
-                'INSERT INTO stock_log (product_id, product_name, requested, available, customer_id) VALUES (?, ?, ?, ?, ?)',
-                [item.product_id, product.name, qty, product.stock, req.user.id]
-              );
-              throw new Error(`Stock insuficiente para "${product.name}". Disponible: ${product.stock}`);
-            }
-            // Reducir stock
+          if (product && product.stock < qty) {
             await conn.execute(
-              'UPDATE products SET stock = stock - ? WHERE id = ?',
-              [qty, item.product_id]
+              'INSERT INTO stock_log (product_id, product_name, requested, available, customer_id) VALUES (?, ?, ?, ?, ?)',
+              [item.product_id, product.name, qty, product.stock, req.user.id]
             );
+            throw new Error(`Stock insuficiente para "${product.name}". Disponible: ${product.stock}`);
           }
+          // NO se descuenta aqui — se descuenta cuando CyberSource confirma el pago
         }
 
         await conn.execute(
@@ -291,15 +283,21 @@ async function cancel(req, res) {
 
     await run("UPDATE orders SET order_status = 'cancelado' WHERE id = ?", [req.params.id]);
 
-    // Restaurar stock al cancelar
-    const cancelDetails = await query('SELECT * FROM order_details WHERE order_id = ?', [req.params.id]);
-    for (const detail of cancelDetails) {
-      if (detail.product_id) {
-        await run('UPDATE products SET stock = stock + ? WHERE id = ?', [detail.quantity, detail.product_id]);
+    // Solo restaurar stock si la orden YA estaba pagada
+    // Si estaba pendiente, el stock nunca fue descontado
+    if (order.order_status === 'pagado') {
+      const cancelDetails = await query('SELECT * FROM order_details WHERE order_id = ?', [req.params.id]);
+      for (const detail of cancelDetails) {
+        if (detail.product_id) {
+          await run('UPDATE products SET stock = stock + ? WHERE id = ?', [detail.quantity, detail.product_id]);
+        }
       }
+      logger.info('orders.cancel', `Orden #${req.params.id} cancelada — stock restaurado (era pagada)`);
+      return res.json({ message: 'Orden cancelada y stock restaurado' });
     }
-    logger.info('orders.cancel', `Orden #${req.params.id} cancelada — stock restaurado`);
-    return res.json({ message: 'Orden cancelada y stock restaurado' });
+
+    logger.info('orders.cancel', `Orden #${req.params.id} cancelada — sin cambios en stock (estaba pendiente)`);
+    return res.json({ message: 'Orden cancelada' });
   } catch (err) {
     return res.status(500).json({ error: 'Error interno del servidor' });
   }
@@ -360,6 +358,21 @@ async function savePaymentDetails(req, res) {
     );
 
     logger.info('orders.payment', `Orden #${id} marcada pagada — CS ID: ${cs_transaction_id || 'simulado'}`);
+
+    // Descontar stock ahora que el pago fue confirmado por CyberSource
+    const orderDetails = await query(
+      'SELECT product_id, quantity FROM order_details WHERE order_id = ?', [id]
+    );
+    for (const detail of orderDetails) {
+      if (detail.product_id) {
+        await run(
+          'UPDATE products SET stock = GREATEST(0, stock - ?) WHERE id = ?',
+          [detail.quantity, detail.product_id]
+        );
+      }
+    }
+    logger.info('orders.payment', `Orden #${id} — stock descontado para ${orderDetails.length} producto(s)`);
+
     const updatedOrder = await queryOne(
       `SELECT o.*,
               COALESCE(o.nombre_cliente, c.full_name) AS nombre_cliente,

@@ -1,24 +1,49 @@
 // src/utils/email.js
 // RF-22 — Confirmación de compra y notificaciones de estado
-// Usa Resend (HTTPS) — compatible con Railway.
-// Configurar en .env: RESEND_API_KEY
+// Usa Brevo (API HTTP) — compatible con Railway, envía a cualquier destinatario.
+// Configurar en .env: BREVO_API_KEY, EMAIL_FROM (correo verificado en Brevo)
 
-const { Resend } = require('resend');
-const logger     = require('./logger');
+const https  = require('https');
+const logger = require('./logger');
 
-// ── Cliente Resend ────────────────────────────────────────────────────────────
-let _resend = null;
+const FROM_EMAIL   = process.env.EMAIL_FROM      || 'marlonaguindab@gmail.com';
+const FROM_NAME    = process.env.EMAIL_FROM_NAME || 'Artesanías Colombianas';
 
-function getResend() {
-  if (_resend) return _resend;
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    logger.warn('email', 'RESEND_API_KEY no configurada — emails desactivados');
-    return null;
-  }
-  _resend = new Resend(apiKey);
-  logger.info('email', 'Resend configurado correctamente');
-  return _resend;
+// ── Envío via Brevo API (HTTPS nativo — sin dependencias extra) ───────────────
+function breveSend(subject, htmlContent, toEmail) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
+      sender:      { name: FROM_NAME, email: FROM_EMAIL },
+      to:          [{ email: toEmail }],
+      subject,
+      htmlContent,
+    });
+    const options = {
+      hostname: 'api.brevo.com',
+      path:     '/v3/smtp/email',
+      method:   'POST',
+      headers: {
+        'accept':          'application/json',
+        'content-type':    'application/json',
+        'api-key':         process.env.BREVO_API_KEY,
+        'content-length':  Buffer.byteLength(payload),
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (res.statusCode >= 200 && res.statusCode < 300) resolve(parsed);
+          else reject(new Error(parsed.message || `HTTP ${res.statusCode}`));
+        } catch { reject(new Error(data)); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 // ── Formato moneda colombiana ─────────────────────────────────────────────────
@@ -62,9 +87,7 @@ function wrapLayout(bodyContent, order) {
           <td style="${BASE.footer}">
             <p style="margin:0;color:#e8d5a8;font-size:13px;">
               ¿Preguntas? Escríbenos a
-              <a href="mailto:${process.env.EMAIL_FROM || 'artesanias@gmail.com'}" style="color:#D4A853;">
-                ${process.env.EMAIL_FROM || 'artesanias@gmail.com'}
-              </a>
+              <a href="mailto:${FROM_EMAIL}" style="color:#D4A853;">${FROM_EMAIL}</a>
             </p>
             <p style="margin:8px 0 0;color:#7a6a5a;font-size:12px;">
               © ${new Date().getFullYear()} Artesanías Colombianas — Bogotá, Colombia
@@ -111,7 +134,6 @@ function buildConfirmacionHTML(order, items) {
   const isPagado     = order.order_status === 'pagado';
 
   const body = `
-    <!-- TÍTULO -->
     <tr>
       <td style="padding:32px 36px 8px;text-align:center;">
         <div style="font-size:48px;margin-bottom:12px;">${isPagado ? '✅' : '🛍️'}</div>
@@ -125,8 +147,6 @@ function buildConfirmacionHTML(order, items) {
         </p>
       </td>
     </tr>
-
-    <!-- INFO ORDEN -->
     <tr>
       <td style="padding:20px 36px;">
         <table width="100%" style="background:#fdf8f2;border-radius:8px;border:1px solid #f0e6d3;">
@@ -157,8 +177,6 @@ function buildConfirmacionHTML(order, items) {
         </table>
       </td>
     </tr>
-
-    <!-- PRODUCTOS -->
     ${items && items.length > 0 ? `
     <tr>
       <td style="padding:0 36px 20px;">
@@ -176,8 +194,6 @@ function buildConfirmacionHTML(order, items) {
         </table>
       </td>
     </tr>` : ''}
-
-    <!-- TOTALES -->
     <tr>
       <td style="padding:0 36px 20px;">
         <table width="100%" style="background:#fdf8f2;border-radius:8px;border:1px solid #f0e6d3;">
@@ -198,8 +214,6 @@ function buildConfirmacionHTML(order, items) {
         </table>
       </td>
     </tr>
-
-    <!-- DIRECCIÓN -->
     ${order.shipping_address ? `
     <tr>
       <td style="padding:0 36px 20px;">
@@ -209,8 +223,6 @@ function buildConfirmacionHTML(order, items) {
         </div>
       </td>
     </tr>` : ''}
-
-    <!-- CTA pendiente -->
     ${!isPagado ? `
     <tr>
       <td style="padding:0 36px 28px;text-align:center;">
@@ -222,25 +234,19 @@ function buildConfirmacionHTML(order, items) {
       </td>
     </tr>` : ''}
   `;
-
   return wrapLayout(body, order);
 }
 
 // ── Template: ENVIADO 🚚 ──────────────────────────────────────────────────────
 function buildEnviadoHTML(order, items) {
   const body = `
-    <!-- BANNER ENVIADO -->
     <tr>
       <td style="background:linear-gradient(135deg,#1a6b9a 0%,#2196b8 100%);padding:36px;text-align:center;">
         <div style="font-size:64px;margin-bottom:12px;">🚚</div>
         <h2 style="margin:0;color:#ffffff;font-size:24px;font-weight:800;">¡Tu pedido está en camino!</h2>
-        <p style="margin:10px 0 0;color:#cceeff;font-size:15px;">
-          Pronto llegará a tus manos con mucho cariño.
-        </p>
+        <p style="margin:10px 0 0;color:#cceeff;font-size:15px;">Pronto llegará a tus manos con mucho cariño.</p>
       </td>
     </tr>
-
-    <!-- INFO ORDEN -->
     <tr>
       <td style="padding:24px 36px 0;">
         <table width="100%" style="background:#f0f8ff;border-radius:8px;border:1px solid #b3d9f0;">
@@ -270,78 +276,38 @@ function buildEnviadoHTML(order, items) {
         </table>
       </td>
     </tr>
-
-    <!-- PRODUCTOS ENVIADOS -->
     ${items && items.length > 0 ? `
     <tr>
       <td style="padding:20px 36px 0;">
         <h3 style="color:#1a3a5a;font-size:15px;margin:0 0 12px;font-weight:700;">📦 Productos en camino</h3>
         <table width="100%" style="border-collapse:collapse;border:1px solid #b3d9f0;border-radius:8px;overflow:hidden;">
-          <thead>
-            <tr style="background:#e0f2fc;">
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#5a8a9a;text-transform:uppercase;">Producto</th>
-              <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#5a8a9a;text-transform:uppercase;">Cant.</th>
-            </tr>
-          </thead>
+          <thead><tr style="background:#e0f2fc;">
+            <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#5a8a9a;text-transform:uppercase;">Producto</th>
+            <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#5a8a9a;text-transform:uppercase;">Cant.</th>
+          </tr></thead>
           <tbody>
             ${(items || []).map(item => `
             <tr>
-              <td style="padding:10px 12px;border-bottom:1px solid #e0f2fc;font-weight:600;color:#1a3a5a;">
-                ${item.product_name || item.sku || 'Producto'}
-              </td>
-              <td style="padding:10px 12px;border-bottom:1px solid #e0f2fc;text-align:center;color:#5a8a9a;">
-                ${item.quantity}
-              </td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e0f2fc;font-weight:600;color:#1a3a5a;">${item.product_name || item.sku || 'Producto'}</td>
+              <td style="padding:10px 12px;border-bottom:1px solid #e0f2fc;text-align:center;color:#5a8a9a;">${item.quantity}</td>
             </tr>`).join('')}
           </tbody>
         </table>
       </td>
     </tr>` : ''}
-
-    <!-- PASOS DE ENTREGA -->
     <tr>
       <td style="padding:20px 36px;">
         <div style="background:#f0f8ff;border-radius:8px;border:1px solid #b3d9f0;padding:20px 24px;">
           <p style="margin:0 0 14px;font-size:14px;font-weight:700;color:#1a3a5a;">¿Qué sigue?</p>
           <table width="100%" cellpadding="0" cellspacing="0">
-            <tr>
-              <td style="width:36px;vertical-align:top;padding-bottom:12px;">
-                <div style="width:28px;height:28px;background:#1a6b9a;border-radius:50%;text-align:center;line-height:28px;color:#fff;font-weight:700;font-size:13px;">1</div>
-              </td>
-              <td style="padding-left:12px;padding-bottom:12px;vertical-align:top;font-size:14px;color:#1a3a5a;">
-                La empresa de mensajería recoge tu paquete y lo pone en ruta.
-              </td>
-            </tr>
-            <tr>
-              <td style="width:36px;vertical-align:top;padding-bottom:12px;">
-                <div style="width:28px;height:28px;background:#1a6b9a;border-radius:50%;text-align:center;line-height:28px;color:#fff;font-weight:700;font-size:13px;">2</div>
-              </td>
-              <td style="padding-left:12px;padding-bottom:12px;vertical-align:top;font-size:14px;color:#1a3a5a;">
-                Recibirás tu pedido en la dirección registrada. ¡Ten a alguien disponible!
-              </td>
-            </tr>
-            <tr>
-              <td style="width:36px;vertical-align:top;">
-                <div style="width:28px;height:28px;background:#2D7A2D;border-radius:50%;text-align:center;line-height:28px;color:#fff;font-weight:700;font-size:13px;">3</div>
-              </td>
-              <td style="padding-left:12px;vertical-align:top;font-size:14px;color:#1a3a5a;">
-                Al recibir, revisa que todo esté en perfecto estado. ¡Gracias por tu compra!
-              </td>
-            </tr>
+            <tr><td style="width:36px;vertical-align:top;padding-bottom:12px;"><div style="width:28px;height:28px;background:#1a6b9a;border-radius:50%;text-align:center;line-height:28px;color:#fff;font-weight:700;font-size:13px;">1</div></td><td style="padding-left:12px;padding-bottom:12px;vertical-align:top;font-size:14px;color:#1a3a5a;">La empresa de mensajería recoge tu paquete y lo pone en ruta.</td></tr>
+            <tr><td style="width:36px;vertical-align:top;padding-bottom:12px;"><div style="width:28px;height:28px;background:#1a6b9a;border-radius:50%;text-align:center;line-height:28px;color:#fff;font-weight:700;font-size:13px;">2</div></td><td style="padding-left:12px;padding-bottom:12px;vertical-align:top;font-size:14px;color:#1a3a5a;">Recibirás tu pedido en la dirección registrada. ¡Ten a alguien disponible!</td></tr>
+            <tr><td style="width:36px;vertical-align:top;"><div style="width:28px;height:28px;background:#2D7A2D;border-radius:50%;text-align:center;line-height:28px;color:#fff;font-weight:700;font-size:13px;">3</div></td><td style="padding-left:12px;vertical-align:top;font-size:14px;color:#1a3a5a;">Al recibir, revisa que todo esté en perfecto estado. ¡Gracias por tu compra!</td></tr>
           </table>
         </div>
       </td>
     </tr>
-
-    <!-- CTA -->
-    <tr>
-      <td style="padding:0 36px 28px;text-align:center;">
-        <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/mis-pedidos"
-           style="display:inline-block;background:#1a6b9a;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">
-          📋 Ver mis pedidos
-        </a>
-      </td>
-    </tr>
+    <tr><td style="padding:0 36px 28px;text-align:center;"><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/mis-pedidos" style="display:inline-block;background:#1a6b9a;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">📋 Ver mis pedidos</a></td></tr>
   `;
   return wrapLayout(body, order);
 }
@@ -349,104 +315,40 @@ function buildEnviadoHTML(order, items) {
 // ── Template: ENTREGADO 📦 ────────────────────────────────────────────────────
 function buildEntregadoHTML(order, items) {
   const body = `
-    <!-- BANNER ENTREGADO -->
     <tr>
       <td style="background:linear-gradient(135deg,#1a7a2a 0%,#2D7A2D 100%);padding:36px;text-align:center;">
         <div style="font-size:64px;margin-bottom:12px;">📦</div>
         <h2 style="margin:0;color:#ffffff;font-size:24px;font-weight:800;">¡Tu pedido fue entregado!</h2>
-        <p style="margin:10px 0 0;color:#b3f0b3;font-size:15px;">
-          Esperamos que disfrutes tus artesanías. ¡Gracias por tu compra!
-        </p>
+        <p style="margin:10px 0 0;color:#b3f0b3;font-size:15px;">Esperamos que disfrutes tus artesanías. ¡Gracias por tu compra!</p>
       </td>
     </tr>
-
-    <!-- RESUMEN -->
     <tr>
       <td style="padding:24px 36px 0;">
         <table width="100%" style="background:#f2fdf2;border-radius:8px;border:1px solid #a3d9a3;">
           <tr>
-            <td style="padding:14px 18px;border-bottom:1px solid #a3d9a3;">
-              <span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">N° de orden</span><br/>
-              <span style="font-size:20px;font-weight:800;color:#1a5a1a;">#${order.id}</span>
-            </td>
-            <td style="padding:14px 18px;border-bottom:1px solid #a3d9a3;">
-              <span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Total pagado</span><br/>
-              <span style="font-size:18px;font-weight:800;color:#1a5a1a;">${fmt(order.amount)}</span>
-            </td>
-            <td style="padding:14px 18px;border-bottom:1px solid #a3d9a3;">
-              <span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Estado</span><br/>
-              <span style="font-size:15px;font-weight:700;color:#1a5a1a;">📦 Entregado</span>
-            </td>
+            <td style="padding:14px 18px;border-bottom:1px solid #a3d9a3;"><span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">N° de orden</span><br/><span style="font-size:20px;font-weight:800;color:#1a5a1a;">#${order.id}</span></td>
+            <td style="padding:14px 18px;border-bottom:1px solid #a3d9a3;"><span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Total pagado</span><br/><span style="font-size:18px;font-weight:800;color:#1a5a1a;">${fmt(order.amount)}</span></td>
+            <td style="padding:14px 18px;border-bottom:1px solid #a3d9a3;"><span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Estado</span><br/><span style="font-size:15px;font-weight:700;color:#1a5a1a;">📦 Entregado</span></td>
           </tr>
-          ${order.shipping_address ? `
-          <tr>
-            <td colspan="3" style="padding:14px 18px;">
-              <span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">📍 Entregado en</span><br/>
-              <span style="font-size:14px;color:#1a3a1a;">
-                ${order.shipping_address}${order.barrio ? ', ' + order.barrio : ''}${order.city ? ', ' + order.city : ''}
-              </span>
-            </td>
-          </tr>` : ''}
+          ${order.shipping_address ? `<tr><td colspan="3" style="padding:14px 18px;"><span style="font-size:12px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">📍 Entregado en</span><br/><span style="font-size:14px;color:#1a3a1a;">${order.shipping_address}${order.barrio ? ', ' + order.barrio : ''}${order.city ? ', ' + order.city : ''}</span></td></tr>` : ''}
         </table>
       </td>
     </tr>
-
-    <!-- PRODUCTOS ENTREGADOS -->
     ${items && items.length > 0 ? `
     <tr>
       <td style="padding:20px 36px 0;">
         <h3 style="color:#1a3a1a;font-size:15px;margin:0 0 12px;font-weight:700;">✅ Productos entregados</h3>
         <table width="100%" style="border-collapse:collapse;border:1px solid #a3d9a3;border-radius:8px;overflow:hidden;">
-          <thead>
-            <tr style="background:#d4f0d4;">
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Producto</th>
-              <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Cant.</th>
-              <th style="padding:10px 12px;text-align:right;font-size:11px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${(items || []).map(item => `
-            <tr>
-              <td style="padding:10px 12px;border-bottom:1px solid #d4f0d4;font-weight:600;color:#1a3a1a;">
-                ${item.product_name || item.sku || 'Producto'}
-              </td>
-              <td style="padding:10px 12px;border-bottom:1px solid #d4f0d4;text-align:center;color:#4a8a4a;">
-                ${item.quantity}
-              </td>
-              <td style="padding:10px 12px;border-bottom:1px solid #d4f0d4;text-align:right;font-weight:700;color:#1a5a1a;">
-                ${fmt(item.price * item.quantity)}
-              </td>
-            </tr>`).join('')}
-          </tbody>
+          <thead><tr style="background:#d4f0d4;"><th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Producto</th><th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Cant.</th><th style="padding:10px 12px;text-align:right;font-size:11px;font-weight:700;color:#4a8a4a;text-transform:uppercase;">Total</th></tr></thead>
+          <tbody>${(items || []).map(item => `<tr><td style="padding:10px 12px;border-bottom:1px solid #d4f0d4;font-weight:600;color:#1a3a1a;">${item.product_name || item.sku || 'Producto'}</td><td style="padding:10px 12px;border-bottom:1px solid #d4f0d4;text-align:center;color:#4a8a4a;">${item.quantity}</td><td style="padding:10px 12px;border-bottom:1px solid #d4f0d4;text-align:right;font-weight:700;color:#1a5a1a;">${fmt(item.price * item.quantity)}</td></tr>`).join('')}</tbody>
         </table>
       </td>
     </tr>` : ''}
-
-    <!-- MENSAJE CÁLIDO -->
-    <tr>
-      <td style="padding:20px 36px;">
-        <div style="background:#f2fdf2;border-radius:8px;border:1px solid #a3d9a3;padding:20px 24px;text-align:center;">
-          <p style="margin:0;font-size:15px;color:#1a3a1a;line-height:1.7;">
-            🌿 Cada pieza que creamos lleva el alma de nuestros artesanos colombianos.<br/>
-            <strong>¡Gracias por apoyar el arte y la tradición de Colombia!</strong>
-          </p>
-        </div>
-      </td>
-    </tr>
-
-    <!-- CTA -->
-    <tr>
-      <td style="padding:0 36px 28px;text-align:center;">
-        <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}"
-           style="display:inline-block;background:#2D7A2D;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;margin-right:12px;">
-          🛍️ Seguir comprando
-        </a>
-        <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/mis-pedidos"
-           style="display:inline-block;background:#f0f0f0;color:#1a3a1a;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">
-          📋 Mis pedidos
-        </a>
-      </td>
-    </tr>
+    <tr><td style="padding:20px 36px;"><div style="background:#f2fdf2;border-radius:8px;border:1px solid #a3d9a3;padding:20px 24px;text-align:center;"><p style="margin:0;font-size:15px;color:#1a3a1a;line-height:1.7;">🌿 Cada pieza que creamos lleva el alma de nuestros artesanos colombianos.<br/><strong>¡Gracias por apoyar el arte y la tradición de Colombia!</strong></p></div></td></tr>
+    <tr><td style="padding:0 36px 28px;text-align:center;">
+      <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}" style="display:inline-block;background:#2D7A2D;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;margin-right:12px;">🛍️ Seguir comprando</a>
+      <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/mis-pedidos" style="display:inline-block;background:#f0f0f0;color:#1a3a1a;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">📋 Mis pedidos</a>
+    </td></tr>
   `;
   return wrapLayout(body, order);
 }
@@ -454,121 +356,54 @@ function buildEntregadoHTML(order, items) {
 // ── Template: CANCELADO ❌ ────────────────────────────────────────────────────
 function buildCanceladoHTML(order, items) {
   const body = `
-    <!-- BANNER CANCELADO -->
     <tr>
       <td style="background:linear-gradient(135deg,#7a1a1a 0%,#a83232 100%);padding:36px;text-align:center;">
         <div style="font-size:64px;margin-bottom:12px;">❌</div>
         <h2 style="margin:0;color:#ffffff;font-size:24px;font-weight:800;">Pedido cancelado</h2>
-        <p style="margin:10px 0 0;color:#f0c0c0;font-size:15px;">
-          Tu orden #${order.id} ha sido cancelada.
-        </p>
+        <p style="margin:10px 0 0;color:#f0c0c0;font-size:15px;">Tu orden #${order.id} ha sido cancelada.</p>
       </td>
     </tr>
-
-    <!-- INFO ORDEN -->
     <tr>
       <td style="padding:24px 36px 0;">
         <table width="100%" style="background:#fff5f5;border-radius:8px;border:1px solid #f0b3b3;">
           <tr>
-            <td style="padding:14px 18px;border-bottom:1px solid #f0b3b3;">
-              <span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">N° de orden</span><br/>
-              <span style="font-size:20px;font-weight:800;color:#7a1a1a;">#${order.id}</span>
-            </td>
-            <td style="padding:14px 18px;border-bottom:1px solid #f0b3b3;">
-              <span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Monto</span><br/>
-              <span style="font-size:18px;font-weight:800;color:#7a1a1a;">${fmt(order.amount)}</span>
-            </td>
-            <td style="padding:14px 18px;border-bottom:1px solid #f0b3b3;">
-              <span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Estado</span><br/>
-              <span style="font-size:15px;font-weight:700;color:#7a1a1a;">❌ Cancelado</span>
-            </td>
+            <td style="padding:14px 18px;border-bottom:1px solid #f0b3b3;"><span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">N° de orden</span><br/><span style="font-size:20px;font-weight:800;color:#7a1a1a;">#${order.id}</span></td>
+            <td style="padding:14px 18px;border-bottom:1px solid #f0b3b3;"><span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Monto</span><br/><span style="font-size:18px;font-weight:800;color:#7a1a1a;">${fmt(order.amount)}</span></td>
+            <td style="padding:14px 18px;border-bottom:1px solid #f0b3b3;"><span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Estado</span><br/><span style="font-size:15px;font-weight:700;color:#7a1a1a;">❌ Cancelado</span></td>
           </tr>
-          <tr>
-            <td colspan="3" style="padding:14px 18px;">
-              <span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Método de pago</span><br/>
-              <span style="font-size:14px;color:#7a1a1a;text-transform:capitalize;">${order.payment_method || '—'}</span>
-            </td>
-          </tr>
+          <tr><td colspan="3" style="padding:14px 18px;"><span style="font-size:12px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Método de pago</span><br/><span style="font-size:14px;color:#7a1a1a;text-transform:capitalize;">${order.payment_method || '—'}</span></td></tr>
         </table>
       </td>
     </tr>
-
-    <!-- PRODUCTOS CANCELADOS -->
     ${items && items.length > 0 ? `
     <tr>
       <td style="padding:20px 36px 0;">
         <h3 style="color:#7a1a1a;font-size:15px;margin:0 0 12px;font-weight:700;">Productos de la orden cancelada</h3>
         <table width="100%" style="border-collapse:collapse;border:1px solid #f0b3b3;border-radius:8px;overflow:hidden;">
-          <thead>
-            <tr style="background:#ffe0e0;">
-              <th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Producto</th>
-              <th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Cant.</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${(items || []).map(item => `
-            <tr>
-              <td style="padding:10px 12px;border-bottom:1px solid #ffe0e0;font-weight:600;color:#7a1a1a;text-decoration:line-through;opacity:0.7;">
-                ${item.product_name || item.sku || 'Producto'}
-              </td>
-              <td style="padding:10px 12px;border-bottom:1px solid #ffe0e0;text-align:center;color:#9a4a4a;opacity:0.7;">
-                ${item.quantity}
-              </td>
-            </tr>`).join('')}
-          </tbody>
+          <thead><tr style="background:#ffe0e0;"><th style="padding:10px 12px;text-align:left;font-size:11px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Producto</th><th style="padding:10px 12px;text-align:center;font-size:11px;font-weight:700;color:#9a4a4a;text-transform:uppercase;">Cant.</th></tr></thead>
+          <tbody>${(items || []).map(item => `<tr><td style="padding:10px 12px;border-bottom:1px solid #ffe0e0;font-weight:600;color:#7a1a1a;text-decoration:line-through;opacity:0.7;">${item.product_name || item.sku || 'Producto'}</td><td style="padding:10px 12px;border-bottom:1px solid #ffe0e0;text-align:center;color:#9a4a4a;opacity:0.7;">${item.quantity}</td></tr>`).join('')}</tbody>
         </table>
       </td>
     </tr>` : ''}
-
-    <!-- AVISO REEMBOLSO -->
-    <tr>
-      <td style="padding:20px 36px;">
-        <div style="background:#fff5f5;border-left:4px solid #a83232;border-radius:0 8px 8px 0;padding:16px 20px;">
-          <p style="margin:0 0 8px;font-size:14px;font-weight:700;color:#7a1a1a;">ℹ️ Sobre tu reembolso</p>
-          <p style="margin:0;font-size:14px;color:#5a2a2a;line-height:1.6;">
-            Si realizaste un pago, el reembolso será procesado en un plazo de <strong>3 a 5 días hábiles</strong>
-            según tu entidad bancaria. Si tienes dudas, contáctanos.
-          </p>
-        </div>
-      </td>
-    </tr>
-
-    <!-- CTA -->
-    <tr>
-      <td style="padding:0 36px 28px;text-align:center;">
-        <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}"
-           style="display:inline-block;background:#a83232;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">
-          🛍️ Ver productos
-        </a>
-      </td>
-    </tr>
+    <tr><td style="padding:20px 36px;"><div style="background:#fff5f5;border-left:4px solid #a83232;border-radius:0 8px 8px 0;padding:16px 20px;"><p style="margin:0 0 8px;font-size:14px;font-weight:700;color:#7a1a1a;">ℹ️ Sobre tu reembolso</p><p style="margin:0;font-size:14px;color:#5a2a2a;line-height:1.6;">Si realizaste un pago, el reembolso será procesado en un plazo de <strong>3 a 5 días hábiles</strong> según tu entidad bancaria. Si tienes dudas, contáctanos.</p></div></td></tr>
+    <tr><td style="padding:0 36px 28px;text-align:center;"><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}" style="display:inline-block;background:#a83232;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:700;font-size:15px;">🛍️ Ver productos</a></td></tr>
   `;
   return wrapLayout(body, order);
 }
 
 // ── Enviar email según estado ─────────────────────────────────────────────────
 async function sendEmailByStatus(order, items, recipientEmail, status) {
+  if (!process.env.BREVO_API_KEY) {
+    logger.warn('email', 'BREVO_API_KEY no configurada — email no enviado');
+    return { sent: false, reason: 'sin_api_key' };
+  }
+
   const configs = {
-    pendiente: {
-      subject: `🛍️ Pedido recibido #${order.id} | Artesanías Colombianas`,
-      html:    () => buildConfirmacionHTML({ ...order, order_status: 'pendiente' }, items),
-    },
-    pagado: {
-      subject: `✅ Pago confirmado — Orden #${order.id} | Artesanías Colombianas`,
-      html:    () => buildConfirmacionHTML({ ...order, order_status: 'pagado' }, items),
-    },
-    enviado: {
-      subject: `🚚 Tu pedido #${order.id} está en camino | Artesanías Colombianas`,
-      html:    () => buildEnviadoHTML(order, items),
-    },
-    entregado: {
-      subject: `📦 ¡Tu pedido #${order.id} fue entregado! | Artesanías Colombianas`,
-      html:    () => buildEntregadoHTML(order, items),
-    },
-    cancelado: {
-      subject: `❌ Orden #${order.id} cancelada | Artesanías Colombianas`,
-      html:    () => buildCanceladoHTML(order, items),
-    },
+    pendiente: { subject: `🛍️ Pedido recibido #${order.id} | Artesanías Colombianas`,           html: () => buildConfirmacionHTML({ ...order, order_status: 'pendiente' }, items) },
+    pagado:    { subject: `✅ Pago confirmado — Orden #${order.id} | Artesanías Colombianas`,    html: () => buildConfirmacionHTML({ ...order, order_status: 'pagado'    }, items) },
+    enviado:   { subject: `🚚 Tu pedido #${order.id} está en camino | Artesanías Colombianas`,  html: () => buildEnviadoHTML(order, items)   },
+    entregado: { subject: `📦 ¡Tu pedido #${order.id} fue entregado! | Artesanías Colombianas`, html: () => buildEntregadoHTML(order, items) },
+    cancelado: { subject: `❌ Orden #${order.id} cancelada | Artesanías Colombianas`,           html: () => buildCanceladoHTML(order, items) },
   };
 
   const cfg = configs[status];
@@ -580,32 +415,17 @@ async function sendEmailByStatus(order, items, recipientEmail, status) {
     return { sent: false, reason: 'sin_email' };
   }
 
-  const resend = getResend();
-  if (!resend) return { sent: false, reason: 'sin_api_key' };
-
   try {
-    const { data, error } = await resend.emails.send({
-      from:    'onboarding@resend.dev',
-      to:      email,
-      subject: cfg.subject,
-      html:    cfg.html(),
-    });
-
-    if (error) {
-      logger.error('email', `Error Resend [${status}] a ${email}: ${error.message}`);
-      return { sent: false, reason: error.message };
-    }
-
-    logger.info('email', `📧 Email [${status}] enviado a ${email} — Resend ID: ${data.id}`);
-    return { sent: true, messageId: data.id };
-
+    const result = await breveSend(cfg.subject, cfg.html(), email);
+    logger.info('email', `📧 Email [${status}] enviado a ${email} — Brevo ID: ${result.messageId || 'ok'}`);
+    return { sent: true, messageId: result.messageId };
   } catch (err) {
-    logger.error('email', `Error enviando [${status}] a ${email}: ${err.message}`);
+    logger.error('email', `Error Brevo [${status}] a ${email}: ${err.message}`);
     return { sent: false, reason: err.message };
   }
 }
 
-// ── Función legacy (compatibilidad con código existente) ──────────────────────
+// ── Compatibilidad con código existente ───────────────────────────────────────
 async function sendConfirmacionCompra(order, items, recipientEmail) {
   return sendEmailByStatus(order, items, recipientEmail, order.order_status);
 }

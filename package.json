@@ -9,6 +9,7 @@
     "db:migrate": "node src/models/migrate.js"
   },
   "dependencies": {
+    "@getbrevo/brevo": "^5.0.4",
     "axios": "^1.6.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

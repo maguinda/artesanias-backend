@@ -56,7 +56,7 @@ function mapExt(el) {
 // GET /api/products
 async function getAll(req, res) {
   try {
-    const { section = 'getByCompany', page = 1, limit = 20, source = 'local', category } = req.query;
+    const { section = 'getByCompany', page = 1, limit = 20, source = 'local', category, search } = req.query;
     const pg     = Math.max(1, parseInt(page));
     const lm     = Math.min(100, Math.max(1, parseInt(limit)));
     const offset = (pg - 1) * lm;
@@ -66,7 +66,10 @@ async function getAll(req, res) {
     if (source === 'all' || source === 'local') {
       const params = [];
       let sql = 'SELECT * FROM products';
-      if (category) { sql += ' WHERE category = ?'; params.push(category); }
+      const wheres = [];
+      if (category) { wheres.push('category = ?');              params.push(category); }
+      if (search)   { wheres.push('name LIKE ?');               params.push(`%${search}%`); }
+      if (wheres.length) sql += ' WHERE ' + wheres.join(' AND ');
       sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
       params.push(lm, offset);
       local = (await query(sql, params)).map(p => ({ ...p, source: 'local' }));
